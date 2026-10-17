@@ -1,0 +1,12 @@
+[server]
+enableStaticServing = true
+
+[theme]
+# Matches the app's own dark background, so the very first paint while a page
+# loads is dark instead of a white flash.
+backgroundColor = "#0e1117"
+
+[runner]
+# The app has no bare-expression 'magic' output, so skip the slow (~0.5s+) rewrite of the whole script on every page load.
+magicEnabled = false
+
