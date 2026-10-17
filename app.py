@@ -2,6 +2,7 @@
 # 1. Imports
 # ===============================
 import streamlit as st
+import nexlearn_folders
 import os, json, uuid, random, re, html, time, hashlib, hmac, base64, copy, tempfile
 from datetime import datetime, date, timedelta
 import pypdfium2 as pdfium
@@ -5519,6 +5520,40 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                         st.session_state.pending_page = "Study Mode"
                         st.session_state.pending_study_note = note_id
                         st.rerun()
+
+        # ===============================
+        # Notes library: the glass folder (React component, see nexlearn_folders.py)
+        # ===============================
+        _library = get_recent_notes(notes, limit=8) if notes else []
+        if _library and nexlearn_folders.available():
+            st.markdown("<p class='home-section-title'>🗂️ Your Notes Library</p>", unsafe_allow_html=True)
+            _arts = ["aurora", "dusk", "ember", "verdant"]
+            _picked = nexlearn_folders.glass_folders(
+                [{
+                    "id": "notes",
+                    "label": "My Notes",
+                    "meta": f"{len(notes)} note" + ("" if len(notes) == 1 else "s"),
+                    "tone": "dark",
+                    "art": "aurora",
+                    "seed": 3,
+                    "action": "none",
+                    "files": [
+                        {
+                            "name": note.get("title", "Untitled"),
+                            "meta": format_relative_study_date(touched),
+                            "art": _arts[i % len(_arts)],
+                        }
+                        for i, (note_id, note, touched) in enumerate(reversed(_library))
+                    ],
+                }],
+                key="home_notes_folder",
+            )
+            if _picked:
+                _ids = [nid for nid, _n, _t in reversed(_library)]
+                if 0 <= _picked.get("index", -1) < len(_ids):
+                    st.session_state.pending_page = "Study Mode"
+                    st.session_state.pending_study_note = _ids[_picked["index"]]
+                    st.rerun()
 
         st.write("")
 
