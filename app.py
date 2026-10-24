@@ -2,8 +2,7 @@
 # 1. Imports
 # ===============================
 import streamlit as st
-import nexlearn_folders
-import os, json, uuid, random, re, html, time, hashlib, hmac, base64, copy, tempfile
+import os, json, uuid, random, re, html, time, hashlib, hmac, base64, copy, tempfile, math, contextlib
 from datetime import datetime, date, timedelta
 import pypdfium2 as pdfium
 import streamlit.components.v1 as components
@@ -2669,7 +2668,7 @@ def render_auth_page():
         .auth-title {
             color: #f8fafc;
             font-size: 1.9rem;
-            font-weight: 700;
+            font-weight: 500;
             letter-spacing: -0.01em;
             margin: 0 0 1.5rem 0;
         }
@@ -2688,12 +2687,12 @@ def render_auth_page():
             background: linear-gradient(135deg, rgba(99,102,241,0.55), rgba(30,27,75,0.75))!important;
             border: 2px solid rgba(99,102,241,0.5)!important;
             color: #ffffff!important;
-            font-weight: 700!important;
+            font-weight: 500!important;
             padding: 0.9rem!important;
         }
         .st-key-auth_submit button p {
             color: #ffffff!important;
-            font-weight: 700!important;
+            font-weight: 500!important;
         }
 
         .st-key-auth_toggle button {
@@ -2720,7 +2719,7 @@ def render_auth_page():
         .st-key-auth_google_signup button p, .st-key-auth_microsoft_signup button p,
         .st-key-auth_google_login button p, .st-key-auth_microsoft_login button p {
             color: #1a1a1a!important;
-            font-weight: 600!important;
+            font-weight: 500!important;
         }
         .st-key-auth_google_signup button::before, .st-key-auth_microsoft_signup button::before,
         .st-key-auth_google_login button::before, .st-key-auth_microsoft_login button::before {
@@ -2787,7 +2786,7 @@ def render_auth_page():
         .auth-tagline-title {
             color: #f8fafc;
             font-size: 2.1rem;
-            font-weight: 700;
+            font-weight: 500;
             line-height: 1.15;
             letter-spacing: -0.02em;
             margin: 0 0 0.9rem 0;
@@ -2845,12 +2844,14 @@ def render_auth_page():
                 with col_google:
                     if st.button("Sign up with Google", key="auth_google_signup", use_container_width=True):
                         if google_ready:
+                            st.session_state.signed_out = False  # let the new sign-in through
                             st.login("google")
                         else:
                             st.info("Google sign-in isn't set up yet - use the form below for now.")
                 with col_apple:
                     if st.button("Sign up with Microsoft", key="auth_microsoft_signup", use_container_width=True):
                         if _microsoft_login_configured():
+                            st.session_state.signed_out = False  # let the new sign-in through
                             st.login("microsoft")
                         else:
                             st.info("Microsoft sign-in isn't set up yet - use Google or the form below for now.")
@@ -2869,7 +2870,7 @@ def render_auth_page():
                     password = st.text_input("Password", type="password", placeholder="Create a password")
                     confirm = st.text_input("Confirm password", type="password", placeholder="Re-enter your password")
                     submitted = st.form_submit_button(
-                        "🔐  Create Account", key="auth_submit", use_container_width=True
+                        "Create Account", key="auth_submit", use_container_width=True
                     )
 
                 if submitted:
@@ -2890,6 +2891,7 @@ def render_auth_page():
                             st.error(e)
                     else:
                         create_user(first_name, last_name, email, password)
+                        st.session_state.signed_out = False
                         st.session_state.authenticated = True
                         st.session_state.settings["display_name"] = f"{first_name.strip()} {last_name.strip()}".strip()
                         save_settings(st.session_state.settings)
@@ -2905,12 +2907,14 @@ def render_auth_page():
                 with col_google:
                     if st.button("Sign in with Google", key="auth_google_login", use_container_width=True):
                         if google_ready:
+                            st.session_state.signed_out = False  # let the new sign-in through
                             st.login("google")
                         else:
                             st.info("Google sign-in isn't set up yet - use the form below for now.")
                 with col_apple:
                     if st.button("Sign in with Microsoft", key="auth_microsoft_login", use_container_width=True):
                         if _microsoft_login_configured():
+                            st.session_state.signed_out = False  # let the new sign-in through
                             st.login("microsoft")
                         else:
                             st.info("Microsoft sign-in isn't set up yet - use Google or the form below for now.")
@@ -2923,11 +2927,12 @@ def render_auth_page():
                     email = st.text_input("Email", placeholder="you@example.com")
                     password = st.text_input("Password", type="password", placeholder="Enter your password")
                     submitted = st.form_submit_button(
-                        "🔐  Sign In", key="auth_submit", use_container_width=True
+                        "Sign In", key="auth_submit", use_container_width=True
                     )
 
                 if submitted:
                     if verify_user(email, password):
+                        st.session_state.signed_out = False
                         st.session_state.authenticated = True
                         st.rerun()
                     elif not existing_user:
@@ -3145,6 +3150,79 @@ def extract_text_from_pdf(uploaded_file):
         return "Error: Could not extract text from this PDF. Please try a different file."
 
 
+UPLOAD_TYPES = ["pdf", "docx", "pptx", "png", "jpg", "jpeg", "txt"]
+IMAGE_TYPES = ("png", "jpg", "jpeg")
+
+
+def _xml_paragraph_text(xml_bytes, para_tag, text_tag):
+    """Join the text runs of every paragraph in an Office XML part."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_bytes)
+    paragraphs = []
+    for para in root.iter(para_tag):
+        runs = [t.text or "" for t in para.iter(text_tag)]
+        line = "".join(runs).strip()
+        if line:
+            paragraphs.append(line)
+    return "\n".join(paragraphs)
+
+
+def _extract_docx_text(data: bytes) -> str:
+    import io
+    import zipfile
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        return _xml_paragraph_text(z.read("word/document.xml"), ns + "p", ns + "t")
+
+
+def _extract_pptx_text(data: bytes) -> str:
+    import io
+    import re
+    import zipfile
+    ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        slides = sorted(
+            (n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+            key=lambda n: int(re.search(r"(\d+)\.xml$", n).group(1)),
+        )
+        return "\n".join(_xml_paragraph_text(z.read(n), ns + "p", ns + "t") for n in slides)
+
+
+def _extract_image_text(data: bytes) -> str:
+    """OCR an image. Needs the optional rapidocr-onnxruntime package."""
+    from rapidocr_onnxruntime import RapidOCR
+    result, _ = RapidOCR()(data)
+    return "\n".join(item[1] for item in (result or []))
+
+
+def _text_from_upload_bytes(ext: str, data: bytes) -> str:
+    if ext == "docx":
+        return _extract_docx_text(data)
+    if ext == "pptx":
+        return _extract_pptx_text(data)
+    if ext == "txt":
+        return data.decode("utf-8", errors="replace")
+    if ext in IMAGE_TYPES:
+        return _extract_image_text(data)
+    raise ValueError(f"Unsupported file type: {ext}")
+
+
+def extract_text_from_upload(uploaded_file):
+    """Extract text from an uploaded PDF, Word, PowerPoint, text or image file."""
+    ext = os.path.splitext(uploaded_file.name)[1].lstrip(".").lower()
+    if ext == "pdf":
+        return extract_text_from_pdf(uploaded_file)
+    try:
+        text = _text_from_upload_bytes(ext, uploaded_file.getvalue())
+        return clean_extracted_text(text)
+    except ImportError:
+        st.error("Reading text from images needs the rapidocr-onnxruntime package, which isn't installed.")
+        return "Error: Could not read text from this image."
+    except Exception as e:
+        st.error(f"Error extracting text from file: {str(e)}")
+        return "Error: Could not extract text from this file. Please try a different file."
+
+
 @st.cache_data(show_spinner=False)
 def _pdf_page_count(pdf_path: str, mtime: float) -> int:
     import pypdfium2 as pdfium
@@ -3313,11 +3391,11 @@ def _upload_dropzone_script(max_mb) -> str:
         "var iconWrap=makeEl('div','upload-dropzone-icon');"
         "iconWrap.appendChild(cloudIcon());"
         "overlay.appendChild(iconWrap);"
-        "overlay.appendChild(makeEl('div','upload-dropzone-headline','Upload your PDF'));"
-        "var sub=makeEl('div','upload-dropzone-sub','Drag & drop your PDF here, or ');"
+        "overlay.appendChild(makeEl('div','upload-dropzone-headline','Upload your file'));"
+        "var sub=makeEl('div','upload-dropzone-sub','Drag & drop your file here, or ');"
         "sub.appendChild(makeEl('span','upload-dropzone-browse-link','browse'));"
         "overlay.appendChild(sub);"
-        f"overlay.appendChild(makeEl('div','upload-dropzone-caption','PDF \u2022 Maximum {int(max_mb)} MB'));"
+        f"overlay.appendChild(makeEl('div','upload-dropzone-caption','PDF, DOCX, PPTX, PNG, JPG, TXT \u2022 Maximum {int(max_mb)} MB'));"
         "section.appendChild(overlay);"
         "overlay.addEventListener('click',function(e){e.stopPropagation();nativeButton.click();});"
         "['dragenter','dragover'].forEach(function(t){section.addEventListener(t,function(){section.classList.add('is-dragging');});});"
@@ -3332,19 +3410,57 @@ def _upload_dropzone_script(max_mb) -> str:
     )
 
 
-def _instant_save_overlay_script() -> str:
-    """Shows a loading line the instant Save Notes is clicked, with no
-    server round-trip, right below the button - the exact spot the real
-    st.spinner() shows up once it arrives.
+def _format_file_size(num_bytes: int) -> str:
+    if not num_bytes:
+        return "0 Bytes"
+    units = ["Bytes", "KB", "MB", "GB"]
+    i = min(int(math.log(num_bytes, 1024)), len(units) - 1)
+    return f"{num_bytes / 1024 ** i:.2f} {units[i]}"
 
-    Saving can take over a second (extracting a PDF's text isn't instant),
-    and it turns out Streamlit doesn't flush its own st.spinner() to the
-    browser until that work yields control back - so even the "real" spinner
-    can visibly lag behind the click by up to a second. This reacts to the
-    actual browser click event directly, so the loading state appears the
-    moment the button is pressed. It hands off to the real spinner once that
-    arrives (or the save finishes, or an error shows), and a timeout is a
-    last-resort safety net so it can never get stuck showing forever.
+
+def _upload_file_card_html(uploaded_file) -> str:
+    """The 'uploaded file' row shown under the dropzone: thumbnail or file
+    icon, name, size, and a progress bar that fills to 100% (spinner, then a
+    green check and a remove button). The fill is a CSS animation that starts
+    when the card first appears, so it restarts for every newly chosen file."""
+    ext = os.path.splitext(uploaded_file.name)[1].lstrip(".").lower()
+    size = uploaded_file.size
+    if ext in IMAGE_TYPES and size <= 5 * 1024 * 1024:
+        mime = "image/png" if ext == "png" else "image/jpeg"
+        b64 = base64.b64encode(uploaded_file.getvalue()).decode()
+        thumb = f"<img class='upc-thumb' src='data:{mime};base64,{b64}' alt=''/>"
+    else:
+        thumb = (
+            "<svg class='upc-thumb upc-thumb-icon' viewBox='0 0 24 24' fill='none' stroke='currentColor' "
+            "stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'>"
+            "<path d='M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z'/>"
+            "<path d='M14 2v6h6'/></svg>"
+        )
+    name = html.escape(uploaded_file.name)
+    return (
+        "<div class='upc-card'>"
+        f"<div class='upc-thumb-wrap'>{thumb}"
+        "<svg class='upc-badge' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
+        "stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg></div>"
+        "<div class='upc-body'>"
+        f"<div class='upc-name' title='{name}'>{name}</div>"
+        "<div class='upc-meta'>"
+        f"<span>{_format_file_size(size)}</span>"
+        "<span class='upc-status'><span class='upc-pct'></span>"
+        "<span class='upc-spin'></span>"
+        "<svg class='upc-trash' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' "
+        "stroke-linecap='round' stroke-linejoin='round' role='button' aria-label='Remove file'>"
+        "<path d='M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 11v6M14 11v6'/></svg></span>"
+        "</div>"
+        "<div class='upc-track'><div class='upc-fill'></div></div>"
+        "</div></div>"
+    )
+
+
+def _upload_file_card_script() -> str:
+    """Hides Streamlit's own file chip (the card replaces it) and makes the
+    card's trash icon click the chip's real remove button, so removing a file
+    works exactly as before.
 
     Note: no "<" anywhere in the script body - Streamlit's HTML sanitizer
     silently drops any script containing one.
@@ -3353,35 +3469,221 @@ def _instant_save_overlay_script() -> str:
     return (
         "<script>(function(){"
         f"var _nonce='{nonce}';"
-        "var btn=document.querySelector('.st-key-save_notes_btn button');"
+        "function nativeRemove(){"
+        "var up=document.querySelector(\"[data-testid='stFileUploader']\");"
+        "if(!up)return null;"
+        "var btns=up.querySelectorAll('button');"
+        "for(var i=0;btns.length>i;i++){"
+        "if(!btns[i].closest(\"[data-testid='stFileUploaderDropzone']\"))return btns[i];"
+        "}"
+        "return null;"
+        "}"
+        "function hideChip(){"
+        "var b=nativeRemove();"
+        "if(!b)return;"
+        "var up=document.querySelector(\"[data-testid='stFileUploader']\");"
+        "var el=b;"
+        "while(el.parentElement&&el.parentElement!==up)el=el.parentElement;"
+        "if(el&&el!==b)el.style.display='none';"
+        "}"
+        "hideChip();setTimeout(hideChip,150);setTimeout(hideChip,600);"
+        "if(!window.__upcClickBound){"
+        "window.__upcClickBound=true;"
+        "document.addEventListener('click',function(e){"
+        "var t=e.target.closest&&e.target.closest('.upc-trash');"
+        "if(!t)return;"
+        "var b=nativeRemove();"
+        "if(b)b.click();"
+        "});"
+        "}"
+        "})();</script>"
+    )
+
+
+PROGRESS_BAR_CSS = r"""
+/* progress bar under Save Notes / Generate buttons: fills toward 90% while working, then finishes to 100% in green with a check */
+@property --upc-pct { syntax: '\3c integer>'; initial-value: 0; inherits: false; }
+@keyframes upc-done { to { background: #10b981; } }
+@keyframes upc-pop { to { opacity: 1; transform: scale(1); } }
+.instant-save-overlay.isv-box, .isv-box { display: flex; flex-direction: column; align-items: stretch; gap: 8px; margin-top: 0.75rem; }
+.st-key-page_Upload_Notes:has(.isv-saved) .instant-save-overlay { display: none !important; }
+.isv-row { display: flex; justify-content: space-between; align-items: center; color: #e5e9f0; font-size: 0.95rem; font-weight: 500; }
+.isv-pct { color: #8b94a5; font-size: 0.85rem; animation: isv-count 6s cubic-bezier(0.1, 0.7, 0.3, 1) forwards; counter-reset: isv-p var(--upc-pct); }
+.isv-pct::after { content: counter(isv-p) "%"; }
+.isv-track { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
+.isv-fill { height: 100%; width: 0; border-radius: 999px; background: #5aa2ff; animation: isv-fill 6s cubic-bezier(0.1, 0.7, 0.3, 1) forwards; }
+.isv-label { display: grid; }
+.isv-label > span { grid-area: 1 / 1; }
+.isv-end { display: flex; align-items: center; gap: 6px; }
+.isv-check { display: none; width: 18px; height: 18px; color: #10b981; opacity: 0; transform: scale(0.5); }
+.isv-l-saved { visibility: hidden; }
+.isv-saved .isv-l-saving { animation: isv-vis-off 0.01s linear 0.5s forwards; }
+.isv-saved .isv-l-saved { animation: isv-vis-on 0.01s linear 0.5s forwards; }
+.isv-saved .isv-check { display: block; animation: upc-pop 0.3s ease 0.5s forwards; }
+@keyframes isv-vis-off { to { visibility: hidden; } }
+@keyframes isv-vis-on { to { visibility: visible; } }
+.isv-saved .isv-pct { animation: isv-count-done 0.5s ease-out forwards; }
+.isv-saved .isv-fill { width: calc(var(--isv-n, 90) * 1%); animation: isv-fill-done 0.5s ease-out forwards, upc-done 0.3s ease 0.5s forwards; }
+@keyframes isv-count { to { --upc-pct: 90; } }
+@keyframes isv-fill { to { width: 90%; } }
+@keyframes isv-count-done { from { --upc-pct: var(--isv-n, 90); } to { --upc-pct: 100; } }
+@keyframes isv-fill-done { from { width: calc(var(--isv-n, 90) * 1%); } to { width: 100%; } }
+"""
+
+
+def _progress_bar_html(saving_label: str, done_label: str, key: str = "") -> str:
+    """The finished (green, 100%) progress bar, drawn in place under a button."""
+    return (
+        f"<div class='isv-box isv-saved' data-for='{html.escape(key)}'>"
+        "<div class='isv-row'>"
+        f"<span class='isv-label'><span class='isv-l-saving'>{html.escape(saving_label)}</span>"
+        f"<span class='isv-l-saved'>{html.escape(done_label)}</span></span>"
+        "<span class='isv-end'><span class='isv-pct'></span>"
+        "<svg class='isv-check' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' "
+        "stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/>"
+        "<path d='M8 12.5l3 3 5-6'/></svg></span></div>"
+        "<div class='isv-track'><div class='isv-fill'></div></div></div>"
+    )
+
+
+def _instant_save_overlay_script(
+    btn_key: str = "save_notes_btn",
+    label: str = "Saving your notes...",
+    done_label: str = "Notes saved",
+    done: bool = False,
+) -> str:
+    """Shows a progress bar the instant a button (Save Notes, Generate
+    Flashcards, Generate Quiz) is clicked, with no server round-trip, right
+    below the button.
+
+    The work can take a while, and Streamlit doesn't flush its own
+    st.spinner() to the browser until that work yields control back - so this
+    reacts to the actual browser click event directly. The bar fills toward
+    90% and waits there. For Save Notes the page then draws the finished bar
+    itself (a rerun replaces the page). For the generate buttons, pass
+    done=True on the run after the work finished: the same bar, still on
+    screen, finishes to 100% in green with a check mark.
+
+    Note: no "<" anywhere in the script body - Streamlit's HTML sanitizer
+    silently drops any script containing one.
+    """
+    nonce = uuid.uuid4().hex  # makes the body differ each rerun, so the effect always re-fires
+    return (
+        "<script>(function(){"
+        f"var _nonce='{nonce}';"
+        f"var KEY={json.dumps(btn_key)};"
+        f"var LABEL={json.dumps(label)};"
+        f"var DONE_LABEL={json.dumps(done_label)};"
+        f"var FINISH={'true' if done else 'false'};"
+        "var ID='instant-progress-'+KEY;"
+        "var NS='http://www.w3.org/2000/svg';"
+        "function span(cls,text){"
+        "var s=document.createElement('span');"
+        "if(cls)s.className=cls;"
+        "if(text!==undefined)s.textContent=text;"
+        "return s;"
+        "}"
+        "function build(){"
+        "var el=document.createElement('div');"
+        "el.id=ID;"
+        "el.className='instant-save-overlay isv-box';"
+        "var row=document.createElement('div');"
+        "row.className='isv-row';"
+        "var lab=span('isv-label');"
+        "lab.appendChild(span('isv-l-saving',LABEL));"
+        "lab.appendChild(span('isv-l-saved',DONE_LABEL));"
+        "var end=span('isv-end');"
+        "end.appendChild(span('isv-pct'));"
+        "var svg=document.createElementNS(NS,'svg');"
+        "svg.setAttribute('class','isv-check');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('fill','none');"
+        "svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','2.5');"
+        "svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');"
+        "var c=document.createElementNS(NS,'circle');"
+        "c.setAttribute('cx','12');c.setAttribute('cy','12');c.setAttribute('r','10');"
+        "var p=document.createElementNS(NS,'path');p.setAttribute('d','M8 12.5l3 3 5-6');"
+        "svg.appendChild(c);svg.appendChild(p);"
+        "end.appendChild(svg);"
+        "row.appendChild(lab);row.appendChild(end);"
+        "var track=document.createElement('div');"
+        "track.className='isv-track';"
+        "var fill=document.createElement('div');"
+        "fill.className='isv-fill';"
+        "track.appendChild(fill);"
+        "el.appendChild(row);el.appendChild(track);"
+        "return el;"
+        "}"
+        # Finishes the bar from wherever it has got to (or the 90% it was
+        # heading for) up to 100%, turning it green with a check mark.
+        "function finish(el,from){"
+        "if(el.dataset.done)return;"
+        "if(from===undefined){"
+        "var fill=el.querySelector('.isv-fill');var track=el.querySelector('.isv-track');"
+        "from=track.offsetWidth?Math.round(fill.offsetWidth/track.offsetWidth*100):90;"
+        "}"
+        "el.style.setProperty('--isv-n',String(Math.min(from,99)));"
+        "el.dataset.done='1';"
+        "el.classList.add('isv-saved');"
+        "}"
+        "if(FINISH){"
+        "var existing=document.getElementById(ID);"
+        "if(existing){finish(existing);}"
+        "else{"
+        "var holder=document.querySelector('.st-key-'+KEY);"
+        "if(holder){var made=build();holder.insertAdjacentElement('afterend',made);finish(made,90);}"
+        "}"
+        "}"
+        "var btn=document.querySelector('.st-key-'+KEY+' button');"
         "if(!btn||btn.dataset.instantSaveBound==='true')return;"
         "btn.dataset.instantSaveBound='true';"
         "btn.addEventListener('click',function(){"
-        "if(document.getElementById('instant-save-overlay'))return;"
-        "var anchor=btn.closest('.st-key-save_notes_btn');"
+        "var old=document.getElementById(ID);"
+        "if(old){if(old.dataset.done){old.remove();}else{return;}}"
+        "var anchor=btn.closest('.st-key-'+KEY);"
         "if(!anchor)return;"
-        "var el=document.createElement('div');"
-        "el.id='instant-save-overlay';"
-        "el.className='instant-save-overlay';"
-        "var spin=document.createElement('span');"
-        "spin.className='instant-save-spin';"
-        "var txt=document.createElement('span');"
-        "txt.textContent='Saving your notes...';"
-        "el.appendChild(spin);"
-        "el.appendChild(txt);"
+        "var el=build();"
         # Placed as a sibling right after the button's own container - the
         # same spot in the page flow the real spinner renders into - not a
         # floating banner elsewhere, so there's only ever one loading
         # indicator, in one place, the whole time.
         "anchor.insertAdjacentElement('afterend',el);"
+        # Glide down (slow ease-in-out) so the progress bar is in view without
+        # the user having to scroll.
+        "var sp=el.parentElement;"
+        "while(sp){"
+        "var oy=getComputedStyle(sp).overflowY;"
+        "if((oy==='auto'||oy==='scroll')&&sp.scrollHeight>sp.clientHeight)break;"
+        "sp=sp.parentElement;"
+        "}"
+        "if(!sp)sp=document.scrollingElement;"
+        "var viewBottom=sp===document.scrollingElement?window.innerHeight:sp.getBoundingClientRect().bottom;"
+        # The distance left is re-measured every frame (so the page re-rendering
+        # mid-scroll can't make it jump), and each frame covers a time-based
+        # share of it, which gives a steady glide that eases to a stop.
+        "if(el.getBoundingClientRect().bottom-viewBottom+40>0){"
+        "var prevBehavior=sp.style.scrollBehavior;"
+        "sp.style.scrollBehavior='auto';"
+        "var last=null;var began=Date.now();"
+        "var step=function(ts){"
+        "var vb=sp===document.scrollingElement?window.innerHeight:sp.getBoundingClientRect().bottom;"
+        "var remaining=el.isConnected?el.getBoundingClientRect().bottom-vb+40:0;"
+        "if(last===null)last=ts;"
+        "var dt=Math.min(ts-last,50);last=ts;"
+        "if(1>remaining||Date.now()-began>2500){sp.style.scrollBehavior=prevBehavior;return;}"
+        "var move=remaining*(1-Math.exp(-dt/220));"
+        "sp.scrollTop=sp.scrollTop+Math.max(move,0.5);"
+        "requestAnimationFrame(step);"
+        "};"
+        "requestAnimationFrame(step);"
+        "}"
         "var start=Date.now();"
         "var iv=setInterval(function(){"
-        "var stillThere=document.querySelector('.st-key-save_notes_btn button');"
-        "var realSpinner=document.querySelector(\"[data-testid='stSpinner']\");"
-        "var spinnerUp=realSpinner&&realSpinner.offsetParent!==null;"
+        # Once finished, the bar stays as the "done" state until the next click.
+        "if(el.dataset.done){clearInterval(iv);return;}"
+        "var stillThere=document.querySelector('.st-key-'+KEY+' button');"
         "var err=document.querySelector(\"[data-testid='stException']\");"
-        "var timedOut=Date.now()-start>30000;"
-        "if(!stillThere||spinnerUp||err||timedOut){"
+        "var timedOut=Date.now()-start>120000;"
+        "var finished=document.querySelector('.isv-saved:not(.instant-save-overlay)');"
+        "if(!stillThere||err||timedOut||finished){"
         "el.remove();"
         "clearInterval(iv);"
         "}"
@@ -3406,6 +3708,18 @@ def show_document_preview(title: str, pdf_path: str):
     def _preview_dialog():
         if not pdf_path or not os.path.exists(pdf_path):
             st.warning("The original PDF file for this note couldn't be found.")
+            return
+
+        ext = os.path.splitext(pdf_path)[1].lstrip(".").lower()
+        if ext in IMAGE_TYPES:
+            st.image(pdf_path, use_container_width=True)
+            return
+        if ext in ("docx", "pptx", "txt"):
+            try:
+                with open(pdf_path, "rb") as f:
+                    st.text(_text_from_upload_bytes(ext, f.read()) or "This file has no text.")
+            except Exception:
+                st.error("This document couldn't be displayed. The file may be damaged.")
             return
 
         try:
@@ -3545,6 +3859,9 @@ st.markdown("""
     color: white;
 }
 
+/* Typography: Inter (see .streamlit/config.toml). Bold text is Medium 500, regular text is Light 300. */
+.stApp strong, .stApp b, .stApp th, .stApp summary { font-weight: 500; }
+
 /* the top bar never paints a white strip over the dark pages (e.g. while moving to the sign-in page) */
 [data-testid="stHeader"] { background: transparent !important; }
 
@@ -3557,7 +3874,7 @@ st.markdown("""
     border: 2px solid #4a90e2;
     padding: 10px 24px;
     border-radius: 4px;
-    font-weight: bold;
+    font-weight: 500;
     cursor: pointer;
     transition: all 0.3s ease;
 }
@@ -3597,14 +3914,14 @@ button[data-testid="stBaseButton-secondary"] p {
     color: #f8fafc;
     font-size: 1.35rem;
     line-height: 1.45;
-    font-weight: 700;
+    font-weight: 500;
     margin: 0;
 }
 
 .quiz-section-label {
     color: #cbd5e1;
     font-size: 0.95rem;
-    font-weight: 600;
+    font-weight: 500;
     margin: 0.85rem 0 0.65rem 0;
 }
 
@@ -3628,7 +3945,7 @@ button[data-testid="stBaseButton-secondary"] p {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 700;
+    font-weight: 500;
     flex-shrink: 0;
 }
 
@@ -3667,7 +3984,7 @@ button[data-testid="stBaseButton-secondary"] p {
 .quiz-explanation-title {
     color: #f8fafc;
     font-size: 1rem;
-    font-weight: 700;
+    font-weight: 500;
     margin-bottom: 0.45rem;
 }
 
@@ -3728,7 +4045,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 .page-title {
     color: #f8fafc;
     font-size: 1.4rem;
-    font-weight: 700;
+    font-weight: 500;
     margin: 0;
 }
 
@@ -3768,7 +4085,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
     background: rgba(20, 25, 34, 0.7);
     color: #94a3b8;
     font-size: 0.82rem;
-    font-weight: 600;
+    font-weight: 500;
     margin-bottom: 0.9rem;
 }
 
@@ -3784,7 +4101,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
     position: relative!important;
     z-index: 1!important;
     font-size: 2.3rem!important;
-    font-weight: 700!important;
+    font-weight: 500!important;
     letter-spacing: -0.02em!important;
     line-height: 1.15!important;
     margin: 0!important;
@@ -3803,13 +4120,13 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
     background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%)!important;
     color: #0e1117!important;
     border: none!important;
-    font-weight: 700!important;
+    font-weight: 500!important;
 }
 
 .st-key-home_card_upload button p,
 .st-key-home_card_continue button p {
     color: #0e1117!important;
-    font-weight: 700!important;
+    font-weight: 500!important;
 }
 
 /* Stat cards ("0 Days Streak", "11 Notes", ...): rectangular tiles with a
@@ -3843,7 +4160,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 .stat-card-label {
     color: #94a3b8;
     font-size: 0.85rem;
-    font-weight: 600;
+    font-weight: 500;
 }
 
 .stat-card-icon {
@@ -3860,7 +4177,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 .stat-card-value {
     color: #f8fafc;
     font-size: 1.7rem;
-    font-weight: 800;
+    font-weight: 500;
     letter-spacing: -0.01em;
     white-space: nowrap;
 }
@@ -3868,7 +4185,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 .home-section-title {
     color: #f8fafc;
     font-size: 1.05rem;
-    font-weight: 700;
+    font-weight: 500;
     margin: 0 0 0.6rem 0;
 }
 
@@ -3900,7 +4217,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 
 .week-day-mark {
     font-size: 1.05rem;
-    font-weight: 700;
+    font-weight: 500;
     color: #4b5563;
 }
 
@@ -4020,7 +4337,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 
 .upload-dropzone-overlay .upload-dropzone-headline {
     color: #f4f4f5;
-    font-weight: 600;
+    font-weight: 500;
     font-size: 1.45rem;
 }
 
@@ -4028,7 +4345,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
     color: #a1a1aa;
     font-size: 1.05rem;
 }
-.upload-dropzone-overlay .upload-dropzone-browse-link { color: #5aa2ff; font-weight: 600; }
+.upload-dropzone-overlay .upload-dropzone-browse-link { color: #5aa2ff; font-weight: 500; }
 
 .upload-dropzone-overlay .upload-dropzone-caption {
     color: #71717a;
@@ -4051,7 +4368,7 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
     gap: 0.6rem;
     color: #eef2ff;
     font-size: 0.95rem;
-    font-weight: 600;
+    font-weight: 500;
     margin-top: 0.75rem;
 }
 
@@ -4080,14 +4397,14 @@ div[data-testid="stRadio"] div[role="radiogroup"] label > div:first-child [data-
 .flashcard-title {
     color: #f8fafc;
     font-size: 1.25rem;
-    font-weight: 700;
+    font-weight: 500;
     margin: 0;
 }
 
 .flashcard-count-pill {
     color: #94a3b8;
     font-size: 0.9rem;
-    font-weight: 600;
+    font-weight: 500;
     background: #171d29;
     border: 1px solid #2f3848;
     border-radius: 999px;
@@ -4115,7 +4432,7 @@ div[class*="st-key-flashcard_card_"] [data-testid="stExpander"] summary {
 
 div[class*="st-key-flashcard_card_"] [data-testid="stExpander"] summary p {
     color: #eef2ff;
-    font-weight: 600;
+    font-weight: 500;
     font-size: 0.98rem;
 }
 
@@ -4126,7 +4443,7 @@ div[class*="st-key-flashcard_card_"] [data-testid="stExpanderDetails"] {
 .flashcard-qa-label {
     color: #5aa2ff;
     font-size: 0.72rem;
-    font-weight: 700;
+    font-weight: 500;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     margin: 0.7rem 0 0.3rem 0;
@@ -4822,9 +5139,9 @@ else:
     .sb-avatar {
         flex: none; width: 42px; height: 42px; border-radius: 50%;
         display: flex; align-items: center; justify-content: center;
-        background: #4f5fe8; color: #ffffff; font-weight: 700; font-size: 15px; letter-spacing: 0.02em;
+        background: #4f5fe8; color: #ffffff; font-weight: 500; font-size: 15px; letter-spacing: 0.02em;
     }
-    .sb-name { color: #f1f5f9; font-weight: 600; font-size: 15px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sb-name { color: #f1f5f9; font-weight: 500; font-size: 15px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .stApp [data-testid="stSidebar"] .st-key-sidebar_sign_out button[data-testid] {
         width: auto !important; min-height: 0 !important; height: auto !important;
         margin: 4px 0 0 54px; padding: 6px 0 !important;
@@ -4883,11 +5200,17 @@ else:
                 unsafe_allow_html=True,
             )
             if st.button("Sign Out", key="sidebar_sign_out"):
+                # Clear every local flag first: st.logout() ends the script run, so anything
+                # after it would never execute and the user would stay signed in.
                 st.session_state.signed_out = True
-                st.logout()  # safe no-op if the session isn't a Google (st.login) one
                 st.session_state.authenticated = False
                 st.session_state.show_auth = False
+                st.session_state.auth_view = "login"
                 st.session_state.pending_page = "Home"
+                try:
+                    st.logout()  # clears the Google/Microsoft cookie; no-op for local accounts
+                except Exception:
+                    pass
                 st.rerun()
 
 
@@ -4961,7 +5284,7 @@ if not _landing_only:
             padding: 0.35rem 0.95rem !important;
             min-height: 2.4rem;
         }
-        .st-key-landing_links button p { color: #cbd5e1 !important; font-weight: 600 !important; font-size: 0.9rem !important; }
+        .st-key-landing_links button p { color: #cbd5e1 !important; font-weight: 500 !important; font-size: 0.9rem !important; }
         .st-key-landing_links button:hover { background: rgba(99,102,241,0.22) !important; }
         .st-key-landing_links button:hover p { color: #ffffff !important; }
         @media (max-width: 1100px) {
@@ -5032,15 +5355,15 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
             }
             .st-key-landing_nav button { min-width: 6.2rem; padding: 0.35rem 1.1rem !important; }
             .st-key-landing_login button { background: transparent !important; border: 1px solid rgba(255,255,255,0.18) !important; }
-            .st-key-landing_login button p { color: #e5e7eb !important; font-weight: 600 !important; }
+            .st-key-landing_login button p { color: #e5e7eb !important; font-weight: 500 !important; }
             .st-key-landing_signup button { background: #f8fafc !important; border: 1px solid #f8fafc !important; }
-            .st-key-landing_signup button p { color: #0b1020 !important; font-weight: 700 !important; }
+            .st-key-landing_signup button p { color: #0b1020 !important; font-weight: 500 !important; }
 
             .about-wrap { padding-top: 2.5rem; }
             .landing-section { scroll-margin-top: 5rem; margin: 0 0 3rem 0; }
             .landing-section-head { text-align: center; margin-bottom: 1.4rem; }
             .landing-section-head h2 {
-                color: #f8fafc; font-size: 1.9rem; font-weight: 800; letter-spacing: -0.02em;
+                color: #f8fafc; font-size: 1.9rem; font-weight: 500; letter-spacing: -0.02em;
                 margin: 0 0 0.35rem 0 !important; padding: 0 !important;
             }
             .landing-section-head p { color: #98a2b3; margin: 0 !important; font-size: 1rem; }
@@ -5057,11 +5380,11 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                 width: 2.4rem; height: 2.4rem; border-radius: 12px; display: flex; align-items: center;
                 justify-content: center; font-size: 1.15rem; margin-bottom: 0.7rem; background: rgba(99,102,241,0.18);
             }
-            .landing-card h3 { color: #f8fafc; font-size: 1rem; font-weight: 700; margin: 0 0 0.3rem 0 !important; padding: 0 !important; }
+            .landing-card h3 { color: #f8fafc; font-size: 1rem; font-weight: 500; margin: 0 0 0.3rem 0 !important; padding: 0 !important; }
             .landing-card p { color: #98a2b3; font-size: 0.9rem; line-height: 1.5; margin: 0 !important; }
             .landing-step-num {
                 display: inline-flex; width: 1.9rem; height: 1.9rem; border-radius: 50%; align-items: center;
-                justify-content: center; font-weight: 800; font-size: 0.9rem; color: #fff; margin-bottom: 0.7rem;
+                justify-content: center; font-weight: 500; font-size: 0.9rem; color: #fff; margin-bottom: 0.7rem;
                 background: linear-gradient(135deg, #6366f1, #8b5cf6);
             }
             .landing-faq { max-width: 760px; margin: 0 auto; display: grid; gap: 0.6rem; }
@@ -5070,7 +5393,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                 border: 1px solid #2c3340; border-radius: 14px; padding: 0.9rem 1.1rem;
             }
             .landing-faq details[open] { border-color: rgba(99,102,241,0.55); }
-            .landing-faq summary { color: #f8fafc; font-weight: 600; cursor: pointer; }
+            .landing-faq summary { color: #f8fafc; font-weight: 500; cursor: pointer; }
             .landing-faq details p { color: #98a2b3; font-size: 0.92rem; line-height: 1.55; margin: 0.6rem 0 0 0 !important; }
             </style>
             """,
@@ -5193,12 +5516,12 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                 background: transparent !important;
                 border: 1px solid rgba(255,255,255,0.18) !important;
             }
-            .st-key-landing_login button p { color: #e5e7eb !important; font-weight: 600 !important; }
+            .st-key-landing_login button p { color: #e5e7eb !important; font-weight: 500 !important; }
             .st-key-landing_signup button {
                 background: #f8fafc !important;
                 border: 1px solid #f8fafc !important;
             }
-            .st-key-landing_signup button p { color: #0b1020 !important; font-weight: 700 !important; }
+            .st-key-landing_signup button p { color: #0b1020 !important; font-weight: 500 !important; }
             @keyframes landing-fade-up { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
             .landing-hero { text-align: center; padding: 0.5rem 0 2.25rem 0; animation: landing-fade-up 0.5s ease-out both; }
             @media (prefers-reduced-motion: reduce) { .landing-hero { animation: none; } }
@@ -5210,7 +5533,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
             }
             .landing-headline {
                 font-size: clamp(2rem, 4.6vw, 3.6rem);
-                font-weight: 800;
+                font-weight: 500;
                 line-height: 1.12;
                 letter-spacing: -0.03em;
                 max-width: 880px;
@@ -5318,7 +5641,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                 .bh-sub { color: rgba(255,255,255,0.65); font-size: 1rem; line-height: 1.6; max-width: 28rem; margin: 0 0 1.6rem 0 !important; }
                 .st-key-bh_actions { gap: 0.75rem !important; }
                 .st-key-bh_start button { background: #ffffff !important; border: 1px solid #ffffff !important; border-radius: 999px !important; padding: 0.55rem 1.6rem !important; }
-                .st-key-bh_start button p { color: #000 !important; font-weight: 600 !important; }
+                .st-key-bh_start button p { color: #000 !important; font-weight: 500 !important; }
                 .st-key-bh_more button { background: transparent !important; border: 1px solid rgba(255,255,255,0.28) !important; border-radius: 999px !important; padding: 0.55rem 1.6rem !important; }
                 .st-key-bh_more button p { color: rgba(255,255,255,0.9) !important; font-weight: 500 !important; }
                 @media (max-width: 900px) {
@@ -5522,42 +5845,6 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                         st.rerun()
 
         # ===============================
-        # Notes library: the glass folder (React component, see nexlearn_folders.py)
-        # ===============================
-        _library = get_recent_notes(notes, limit=8) if notes else []
-        if _library and nexlearn_folders.available():
-            st.markdown("<p class='home-section-title'>🗂️ Your Notes Library</p>", unsafe_allow_html=True)
-            _arts = ["aurora", "dusk", "ember", "verdant"]
-            _picked = nexlearn_folders.glass_folders(
-                [{
-                    "id": "notes",
-                    "label": "My Notes",
-                    "meta": f"{len(notes)} note" + ("" if len(notes) == 1 else "s"),
-                    "tone": "dark",
-                    "art": "aurora",
-                    "seed": 3,
-                    "action": "none",
-                    "files": [
-                        {
-                            "name": note.get("title", "Untitled"),
-                            "meta": format_relative_study_date(touched),
-                            "art": _arts[i % len(_arts)],
-                        }
-                        for i, (note_id, note, touched) in enumerate(reversed(_library))
-                    ],
-                }],
-                key="home_notes_folder",
-            )
-            if _picked:
-                _ids = [nid for nid, _n, _t in reversed(_library)]
-                if 0 <= _picked.get("index", -1) < len(_ids):
-                    st.session_state.pending_page = "Study Mode"
-                    st.session_state.pending_study_note = _ids[_picked["index"]]
-                    st.rerun()
-
-        st.write("")
-
-        # ===============================
         # This week's progress
         # ===============================
         st.markdown("<p class='home-section-title'>📈 Your Progress</p>", unsafe_allow_html=True)
@@ -5619,14 +5906,42 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
             .st-key-page_Upload_Notes { max-width: 700px; width: 100%; margin-left: auto; margin-right: auto; gap: 24px !important; }
             /* the zero-height script holders would each add a 24px gap */
             .st-key-page_Upload_Notes [data-testid="stElementContainer"]:has(> [data-testid="stHtml"]) { display: none; }
-            .st-key-page_Upload_Notes .upm-title { color: #f8fafc !important; font-size: 1.9rem !important; font-weight: 800 !important; letter-spacing: -0.02em; line-height: 1.2 !important; text-align: center; margin: 0 !important; padding: 0 !important; }
+            .st-key-page_Upload_Notes .upm-title { color: #f8fafc !important; font-size: 1.9rem !important; font-weight: 500 !important; letter-spacing: -0.02em; line-height: 1.2 !important; text-align: center; margin: 0 !important; padding: 0 !important; }
             .st-key-page_Upload_Notes .upm-sub { color: #98a2b3 !important; font-size: 1rem !important; text-align: center; margin: 6px 0 0 0 !important; }
             .st-key-page_Upload_Notes [data-testid="stFileUploaderDropzone"] { min-height: 210px; padding: 1.5rem 1rem !important; }
+            /* uploaded-file card: progress fills to 100%, then spinner -> check + remove */
+            @property --upc-pct { syntax: '\\3c integer>'; initial-value: 0; inherits: false; }
+            .upc-card { display: flex; align-items: flex-start; gap: 16px; padding: 16px; border-radius: 12px; background: #151b27; border: 1px solid rgba(255,255,255,0.08); animation: upc-in 0.35s ease both; }
+            .upc-thumb-wrap { position: relative; flex-shrink: 0; }
+            .upc-thumb { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1); display: block; }
+            .upc-thumb-icon { border: none; color: #8b94a5; }
+            .upc-badge { position: absolute; right: -8px; bottom: -8px; width: 22px; height: 22px; padding: 2px; border-radius: 50%; background: #151b27; color: #10b981; opacity: 0; transform: scale(0.5); animation: upc-pop 0.3s ease 1.6s forwards; }
+            .upc-body { flex: 1; min-width: 0; }
+            .upc-name { color: #e5e9f0; font-weight: 500; font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .upc-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 4px; color: #8b94a5; font-size: 0.85rem; }
+            .upc-status { display: flex; align-items: center; gap: 6px; }
+            .upc-pct { font-weight: 500; animation: upc-count 1.6s ease-out forwards; counter-reset: upc-p var(--upc-pct); }
+            .upc-pct::after { content: counter(upc-p) "%"; }
+            .upc-spin { width: 14px; height: 14px; border: 2px solid rgba(90,162,255,0.3); border-top-color: #5aa2ff; border-radius: 50%; animation: upc-rot 0.8s linear infinite, upc-hide 0.01s linear 1.6s forwards; }
+            .upc-trash { width: 16px; height: 16px; margin-left: -20px; cursor: pointer; color: #6b7385; visibility: hidden; animation: upc-show 0.01s linear 1.6s forwards; }
+            .upc-trash:hover { color: #f87171; }
+            .upc-track { height: 8px; margin-top: 12px; border-radius: 999px; background: rgba(255,255,255,0.1); overflow: hidden; }
+            .upc-fill { height: 100%; width: 0; border-radius: 999px; background: #5aa2ff; animation: upc-fill 1.6s ease-out forwards, upc-done 0.3s ease 1.6s forwards; }
+            @keyframes upc-in { from { opacity: 0; transform: translateY(16px) scale(0.97); } to { opacity: 1; transform: none; } }
+            @keyframes upc-count { to { --upc-pct: 100; } }
+            @keyframes upc-fill { to { width: 100%; } }
+            @keyframes upc-done { to { background: #10b981; } }
+            @keyframes upc-rot { to { transform: rotate(360deg); } }
+            @keyframes upc-hide { to { visibility: hidden; } }
+            @keyframes upc-show { to { visibility: visible; } }
+            @keyframes upc-pop { to { opacity: 1; transform: scale(1); } }
+            __PROGRESS_CSS__
+            .st-key-page_Upload_Notes [data-testid="stSpinner"] { display: none !important; }
             /* Save Notes: solid blue (the app's one blue, #5aa2ff) with white text */
             .st-key-save_notes_btn button:not(:disabled) {
                 background: #5aa2ff !important; border: 1px solid #5aa2ff !important; color: #ffffff !important;
             }
-            .st-key-save_notes_btn button:not(:disabled) p { color: #ffffff !important; font-weight: 700 !important; }
+            .st-key-save_notes_btn button:not(:disabled) p { color: #ffffff !important; font-weight: 500 !important; }
             .st-key-save_notes_btn button:disabled {
                 background: rgba(90, 162, 255, 0.35) !important; border: 1px solid transparent !important; color: rgba(255, 255, 255, 0.75) !important;
             }
@@ -5634,16 +5949,20 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
             </style>
             <p class='upm-title'>Add study material</p>
             <p class='upm-sub'>Upload a PDF to add it to your notes library.</p>
-            """,
+            """.replace("__PROGRESS_CSS__", PROGRESS_BAR_CSS),
             unsafe_allow_html=True,
         )
 
-        uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"], label_visibility="collapsed")
+        uploaded_file = st.file_uploader("Choose a file", type=UPLOAD_TYPES, label_visibility="collapsed")
         try:
             max_upload_mb = int(st.get_option("server.maxUploadSize") or 200)
         except Exception:
             max_upload_mb = 200
         st.html(_upload_dropzone_script(max_upload_mb), unsafe_allow_javascript=True)
+
+        if uploaded_file:
+            st.markdown(_upload_file_card_html(uploaded_file), unsafe_allow_html=True)
+            st.html(_upload_file_card_script(), unsafe_allow_javascript=True)
 
         if "note_title_input" not in st.session_state:
             st.session_state.note_title_input = ""
@@ -5662,13 +5981,15 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         already_saved = uploaded_file is not None and st.session_state.get("last_saved_upload") == upload_signature
 
         if already_saved:
-            if _persisting():
-                st.success("Saved ✅ (This will still be here after refresh)")
-            else:
-                st.success("Added ✅ (Guest mode: this won't be saved - log in to keep your notes)")
-            if st.button("📚 Go to Study Mode", use_container_width=True):
-                st.session_state.pending_page = "Study Mode"
-                st.rerun()
+            # Same column, button and spot as while saving, so the bar finishing
+            # at 100% doesn't jump or widen.
+            col_l, col_mid, col_r = st.columns([1, 2, 1])
+            with col_mid:
+                st.button("Save Notes", use_container_width=True, disabled=True, key="save_notes_btn")
+                st.markdown(
+                    _progress_bar_html("Saving your notes...", "Notes saved", "save_notes_btn"),
+                    unsafe_allow_html=True,
+                )
         else:
             can_save = uploaded_file is not None and title.strip() != ""
             col_l, col_mid, col_r = st.columns([1, 2, 1])
@@ -5706,13 +6027,13 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                         else:
                             pdf_dir = os.path.join(tempfile.gettempdir(), "nexlearn_guest")
                             os.makedirs(pdf_dir, exist_ok=True)
-                        pdf_path = os.path.join(pdf_dir, f"{note_id}.pdf")
+                        pdf_path = os.path.join(pdf_dir, f"{note_id}{os.path.splitext(uploaded_file.name)[1].lower()}")
                         with open(pdf_path, "wb") as f:
                             f.write(uploaded_file.getbuffer())
 
                         # Extract text (the slow part for a large or scanned PDF - this
                         # is what the spinner is really there for)
-                        extracted_text = extract_text_from_pdf(uploaded_file)
+                        extracted_text = extract_text_from_upload(uploaded_file)
 
                         # Save note data
                         notes = st.session_state.notes
@@ -5743,15 +6064,15 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         .stMainBlockContainer { padding-top: 4.6rem !important; padding-bottom: 2rem !important; }
         .stMainBlockContainer > [data-testid="stVerticalBlock"] { gap: 0 !important; }
         .st-key-page_Study_Mode { gap: 24px !important; max-width: 1180px; }
-        .st-key-page_Study_Mode .sm-title { color: #f8fafc !important; font-size: 2.3rem !important; font-weight: 800 !important; letter-spacing: -0.02em; line-height: 1.15 !important; margin: 0 !important; padding: 0 !important; }
+        .st-key-page_Study_Mode .sm-title { color: #f8fafc !important; font-size: 2.3rem !important; font-weight: 500 !important; letter-spacing: -0.02em; line-height: 1.15 !important; margin: 0 !important; padding: 0 !important; }
         .st-key-page_Study_Mode .sm-sub { color: #aab3c2 !important; font-size: 1.15rem !important; margin: 6px 0 0 0 !important; }
-        .st-key-page_Study_Mode .sm-label { color: #e5e9f0 !important; font-weight: 600 !important; font-size: 1rem !important; margin: 0 !important; }
+        .st-key-page_Study_Mode .sm-label { color: #e5e9f0 !important; font-weight: 500 !important; font-size: 1rem !important; margin: 0 !important; }
 
         /* notes picker row: label on the left, Manage Notes link on the right */
         .st-key-sm_select { gap: 10px !important; }
         .st-key-sm_manage_toggle button[data-testid] {
             background: transparent !important; border: none !important; box-shadow: none !important; transform: none !important;
-            color: #5aa2ff !important; font-weight: 600 !important; padding: 0 !important; min-height: 0 !important;
+            color: #5aa2ff !important; font-weight: 500 !important; padding: 0 !important; min-height: 0 !important;
             width: auto !important; justify-content: flex-end !important; flex-direction: row-reverse; gap: 8px; font-size: 1rem !important;
         }
         .st-key-sm_manage_toggle, .st-key-sm_manage_toggle [data-testid="stButton"] { display: flex; justify-content: flex-end; width: 100%; }
@@ -5772,10 +6093,10 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         .sm-doc { display: flex; gap: 18px; align-items: center; }
         .sm-pdf {
             flex: none; width: 54px; height: 66px; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px;
-            background: linear-gradient(160deg, #ef5a4a, #c8382b); color: #fff; font-weight: 800; font-size: 0.78rem; letter-spacing: 0.04em;
+            background: linear-gradient(160deg, #ef5a4a, #c8382b); color: #fff; font-weight: 500; font-size: 0.78rem; letter-spacing: 0.04em;
             border-radius: 6px; clip-path: polygon(0 0, 68% 0, 100% 24%, 100% 100%, 0 100%);
         }
-        .sm-doc-title { color: #f8fafc; font-size: 1.35rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+        .sm-doc-title { color: #f8fafc; font-size: 1.35rem; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
         .sm-doc-date { color: #9aa4b2; margin-top: 2px; font-size: 1rem; }
         .sm-badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
         .sm-badge { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #c3cbd8; font-size: 0.92rem; }
@@ -5787,11 +6108,11 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         /* blue / outlined buttons (all keep their existing click behaviour) */
         [class*="st-key-preview_doc_"] button[data-testid] {
             background: transparent !important; border: 1px solid #5aa2ff !important; color: #ffffff !important;
-            border-radius: 12px !important; gap: 8px; font-weight: 600 !important;
+            border-radius: 12px !important; gap: 8px; font-weight: 500 !important;
         }
         [class*="st-key-gen_"] button[data-testid]:not(:disabled), [class*="st-key-quiz_gen_"] button[data-testid]:not(:disabled),
         [class*="st-key-fc_next_"] button[data-testid]:not(:disabled) {
-            background: #5aa2ff !important; border: 1px solid #5aa2ff !important; color: #ffffff !important; font-weight: 700 !important; gap: 10px;
+            background: #5aa2ff !important; border: 1px solid #5aa2ff !important; color: #ffffff !important; font-weight: 500 !important; gap: 10px;
         }
         [class*="st-key-gen_"] button[data-testid], [class*="st-key-quiz_gen_"] button[data-testid] { min-height: 52px !important; border-radius: 14px !important; }
         [class*="st-key-fc_prev_"] button[data-testid]:not(:disabled) {
@@ -5837,13 +6158,13 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         div[class*="st-key-active_study_tab_"] div[data-testid="stRadio"] div[role="radiogroup"] label > div > div > div:first-child:not([data-testid]) { display: none !important; }
         div[class*="st-key-active_study_tab_"] div[data-testid="stRadio"] div[role="radiogroup"] label div,
         div[class*="st-key-active_study_tab_"] div[data-testid="stRadio"] div[role="radiogroup"] label [data-testid="stMarkdownContainer"] { color: inherit !important; }
-        div[class*="st-key-active_study_tab_"] div[data-testid="stRadio"] div[role="radiogroup"] label p { color: inherit !important; font-size: 1.02rem !important; font-weight: 600 !important; margin: 0 !important; }
+        div[class*="st-key-active_study_tab_"] div[data-testid="stRadio"] div[role="radiogroup"] label p { color: inherit !important; font-size: 1.02rem !important; font-weight: 500 !important; margin: 0 !important; }
 
         /* the flashcard viewer */
         .st-key-page_Study_Mode [data-testid="stElementContainer"]:has(#study-tabs) { height: 0; margin-bottom: -24px; }
         .st-key-page_Study_Mode [data-testid="stElementContainer"]:has(> [data-testid="stHtml"]) { display: none; }
         .fc-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-        .st-key-page_Study_Mode .fc-title { color: #f8fafc !important; font-size: 1.5rem !important; font-weight: 800 !important; margin: 0 !important; }
+        .st-key-page_Study_Mode .fc-title { color: #f8fafc !important; font-size: 1.5rem !important; font-weight: 500 !important; margin: 0 !important; }
         .st-key-page_Study_Mode .fc-count { color: #9aa4b2 !important; font-size: 1rem !important; white-space: nowrap; }
         /* the flip card */
         /* the row: all cards share one grid cell (so they are all the height of the tallest) and
@@ -5881,14 +6202,14 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
             box-shadow: 0 0 0 1px rgba(90,162,255,0.12), 0 18px 50px -22px rgba(90,162,255,0.5);
         }
         .fc-back { transform: rotateY(180deg); background: linear-gradient(180deg, #11203a 0%, #0f1522 100%); }
-        .fc-label { color: #5aa2ff; letter-spacing: 0.2em; font-size: 0.8rem; font-weight: 700; text-transform: uppercase; }
-        .fc-q { color: #f8fafc; font-size: 1.85rem; font-weight: 800; line-height: 1.3; overflow-wrap: anywhere; }
-        .fc-a { color: #eaf1fb; font-size: 1.4rem; font-weight: 600; line-height: 1.55; overflow-wrap: anywhere; }
+        .fc-label { color: #5aa2ff; letter-spacing: 0.2em; font-size: 0.8rem; font-weight: 500; text-transform: uppercase; }
+        .fc-q { color: #f8fafc; font-size: 1.85rem; font-weight: 500; line-height: 1.3; overflow-wrap: anywhere; }
+        .fc-a { color: #eaf1fb; font-size: 1.4rem; font-weight: 500; line-height: 1.55; overflow-wrap: anywhere; }
         .fc-hint { color: #6b7686; font-size: 0.85rem; margin-top: 8px; }
         .fc-flip-wrap { display: flex; justify-content: center; margin-top: 22px; }
         .fc-flip-btn {
             display: inline-flex; align-items: center; gap: 10px; padding: 13px 30px; border-radius: 12px; cursor: pointer; user-select: none;
-            background: #5aa2ff; color: #ffffff; font-weight: 700; font-size: 1.05rem;
+            background: #5aa2ff; color: #ffffff; font-weight: 500; font-size: 1.05rem;
             transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
         }
         .fc-flip-btn:hover { transform: translateY(-2px); filter: brightness(1.06); box-shadow: 0 12px 28px -12px rgba(90,162,255,0.7); }
@@ -5899,12 +6220,12 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         .fc-nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 26px; }
         .fc-nav-btn {
             display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 150px; height: 44px; padding: 0 22px;
-            border-radius: 12px; cursor: pointer; user-select: none; font-weight: 600; font-size: 1.05rem;
+            border-radius: 12px; cursor: pointer; user-select: none; font-weight: 500; font-size: 1.05rem;
             transition: transform 0.15s ease, background-color 0.2s ease, opacity 0.2s ease, filter 0.2s ease, box-shadow 0.2s ease;
         }
         .fc-nav-btn::before { content: ""; width: 18px; height: 18px; flex: none; background: currentColor; -webkit-mask: var(--ic) center / contain no-repeat; mask: var(--ic) center / contain no-repeat; }
         .fc-nav-prev { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); color: #dbe2ee; --ic: url("__LEFT__"); }
-        .fc-nav-next { background: #5aa2ff; border: 1px solid #5aa2ff; color: #ffffff; font-weight: 700; flex-direction: row-reverse; --ic: url("__RIGHT__"); }
+        .fc-nav-next { background: #5aa2ff; border: 1px solid #5aa2ff; color: #ffffff; font-weight: 500; flex-direction: row-reverse; --ic: url("__RIGHT__"); }
         .fc-nav-btn:hover:not(.is-disabled) { transform: translateY(-2px); filter: brightness(1.08); }
         .fc-nav-next:hover:not(.is-disabled) { box-shadow: 0 12px 28px -12px rgba(90,162,255,0.7); }
         .fc-nav-btn:active:not(.is-disabled) { transform: scale(0.96); }
@@ -5938,7 +6259,10 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         }.items():
             _sm_css = _sm_css.replace(_tag, _sb_icon(_inner))
         st.markdown(
-            _sm_css + "<p class='sm-title'>Study Mode</p><p class='sm-sub'>Choose your notes and start practicing.</p>",
+            _sm_css.rstrip()
+            + "\n<style>" + PROGRESS_BAR_CSS
+            + ".st-key-page_Study_Mode [data-testid='stElementContainer']:has(> [data-testid='stHtml']) { display: none; }</style>"
+            + "<p class='sm-title'>Study Mode</p><p class='sm-sub'>Choose your notes and start practicing.</p>",
             unsafe_allow_html=True,
         )
 
@@ -6078,7 +6402,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                 with gen_fc_col:
                     if st.button("Generate Flashcards", key=f"gen_{sid}", use_container_width=True):
                         user_settings = st.session_state.settings
-                        with st.spinner("Generating flashcards..."):
+                        with contextlib.nullcontext():  # progress bar under the button replaces the spinner
                             flashcards, flashcards_source = generate_flashcards(
                                 note["text"],
                                 max_cards=user_settings["flashcard_count"],
@@ -6091,15 +6415,23 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                         save_notes(notes)
                         st.session_state[f"fc_index_{sid}"] = 0       # start the new set from card 1
                         st.session_state[f"fc_nav_{sid}"] = st.session_state.get(f"fc_nav_{sid}", 0) + 1  # face-up
+                        st.session_state[f"gen_done_fc_{sid}"] = True
                         source_label = "🤖 AI-generated" if flashcards_source == "ai" else "🧩 local generator"
                         st.success(f"✅ Generated {len(flashcards)} flashcards ({source_label})!")
                         st.markdown('[📇 Go to Flashcards](#study-tabs)')
                         st.rerun()
+                    st.html(
+                        _instant_save_overlay_script(
+                            f"gen_{sid}", "Generating flashcards...", "Flashcards ready",
+                            done=bool(st.session_state.pop(f"gen_done_fc_{sid}", False)),
+                        ),
+                        unsafe_allow_javascript=True,
+                    )
 
                 with gen_quiz_col:
                     if st.button("Generate Quiz", key=f"quiz_gen_{sid}", use_container_width=True):
                         user_settings = st.session_state.settings
-                        with st.spinner("Generating quiz..."):
+                        with contextlib.nullcontext():  # progress bar under the button replaces the spinner
                             quiz_questions, quiz_source = generate_quiz(
                                 note["text"],
                                 max_questions=user_settings["quiz_question_count"],
@@ -6121,12 +6453,20 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
                         st.session_state[f"quiz_results_saved_{sid}"] = False
                         st.session_state[f"active_study_tab_{sid}"] = "🎯 Quiz"
                         st.session_state.pending_scroll_target = "study-tabs"
+                        st.session_state[f"gen_done_quiz_{sid}"] = True
                         if quiz_questions:
                             source_label = "🤖 AI-generated" if quiz_source == "ai" else "🧩 local generator"
                             st.toast(f"✅ Generated {len(quiz_questions)} questions ({source_label})")
                         else:
                             st.toast("⚠️ No valid quiz questions could be generated from this note yet.")
                         st.rerun()
+                    st.html(
+                        _instant_save_overlay_script(
+                            f"quiz_gen_{sid}", "Generating quiz...", "Quiz ready",
+                            done=bool(st.session_state.pop(f"gen_done_quiz_{sid}", False)),
+                        ),
+                        unsafe_allow_javascript=True,
+                    )
 
                 # ===============================
                 # Study Tabs (FLASHCARDS | QUIZ)
@@ -6610,8 +6950,8 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
 
         /* heading */
         .set-hero { position: relative; margin-top: 18px; }
-        .set-eyebrow { color: #7fb4ff; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; margin-bottom: 6px; }
-        .st-key-page_Settings .set-h1 { color: #f8fafc !important; font-size: 2.6rem !important; font-weight: 800 !important; letter-spacing: -0.02em; line-height: 1.1 !important; margin: 0 !important; padding: 0 !important; }
+        .set-eyebrow { color: #7fb4ff; font-size: 0.78rem; font-weight: 500; letter-spacing: 0.22em; text-transform: uppercase; margin-bottom: 6px; }
+        .st-key-page_Settings .set-h1 { color: #f8fafc !important; font-size: 2.6rem !important; font-weight: 500 !important; letter-spacing: -0.02em; line-height: 1.1 !important; margin: 0 !important; padding: 0 !important; }
         .st-key-page_Settings .set-sub { color: #aab3c2 !important; font-size: 1.2rem !important; margin: 8px 0 0 0 !important; }
         .set-spark { position: absolute; background: #5aa2ff; -webkit-mask: url("__SPARK__") center / contain no-repeat; mask: url("__SPARK__") center / contain no-repeat; filter: drop-shadow(0 0 8px rgba(90,162,255,0.8)); }
         .set-spark.s1 { width: 30px; height: 30px; right: 14%; top: -2px; }
@@ -6627,12 +6967,12 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         .set-ic { flex: none; width: 56px; height: 56px; border-radius: 14px; background: rgba(90,162,255,0.14); border: 1px solid rgba(90,162,255,0.4); position: relative; }
         .set-ic::before { content: ""; position: absolute; inset: 14px; background: #7fb4ff; -webkit-mask: var(--ic) center / contain no-repeat; mask: var(--ic) center / contain no-repeat; }
         .set-ic-book { --ic: url("__BOOK__"); } .set-ic-gen { --ic: url("__SPARKLES__"); } .set-ic-look { --ic: url("__PALETTE__"); }
-        .set-title { color: #f8fafc; font-size: 1.45rem; font-weight: 700; line-height: 1.2; }
+        .set-title { color: #f8fafc; font-size: 1.45rem; font-weight: 500; line-height: 1.2; }
         .set-desc { color: #aab3c2; font-size: 1rem; margin-top: 2px; }
 
         /* labels and the divider above each toggle row */
         .st-key-page_Settings [data-testid="stWidgetLabel"] p { color: #e5e9f0 !important; font-size: 1rem !important; font-weight: 500 !important; }
-        .set-row-title { color: #f8fafc; font-size: 1.05rem; font-weight: 700; }
+        .set-row-title { color: #f8fafc; font-size: 1.05rem; font-weight: 500; }
         .set-row-sub { color: #aab3c2; font-size: 0.95rem; margin-top: 2px; }
         .st-key-set_toggle_shuffle, .st-key-set_toggle_examples { border-top: 1px solid rgba(255,255,255,0.1); padding-top: 18px; }
         .st-key-settings_shuffle_questions, .st-key-settings_auto_examples { display: flex; justify-content: flex-end; }
@@ -6654,7 +6994,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         .st-key-settings_quiz_difficulty div[role="radiogroup"] label div,
         .st-key-settings_quiz_difficulty div[role="radiogroup"] label [data-testid="stMarkdownContainer"] { color: #dbe2ee !important; }
         .st-key-settings_quiz_difficulty div[role="radiogroup"] label:has(input:checked) div,
-        .st-key-settings_quiz_difficulty div[role="radiogroup"] label:has(input:checked) p { color: #ffffff !important; font-weight: 700 !important; }
+        .st-key-settings_quiz_difficulty div[role="radiogroup"] label:has(input:checked) p { color: #ffffff !important; font-weight: 500 !important; }
         .st-key-settings_quiz_difficulty div[role="radiogroup"] label > div { width: 100%; }
         .st-key-settings_quiz_difficulty div[role="radiogroup"] label > div > div { justify-content: center !important; width: 100%; }
         .st-key-settings_quiz_difficulty div[role="radiogroup"] label p { margin: 0 !important; font-size: 1.02rem !important; }
@@ -6674,7 +7014,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         }
         .st-key-settings_theme div[role="radiogroup"] label:has(input:checked)::after {
             content: "\\2713"; position: absolute; top: 0; right: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
-            background: #5aa2ff; color: #ffffff; font-weight: 800; font-size: 0.95rem; border-radius: 0 12px 0 12px;
+            background: #5aa2ff; color: #ffffff; font-weight: 500; font-size: 0.95rem; border-radius: 0 12px 0 12px;
         }
         .st-key-settings_theme div[role="radiogroup"] label div, .st-key-settings_theme div[role="radiogroup"] label [data-testid="stMarkdownContainer"] { color: #e5e9f0 !important; }
         .st-key-settings_theme div[role="radiogroup"] label > div { position: absolute !important; z-index: 1; left: 14px; right: 14px; bottom: 12px; width: auto !important; }
@@ -6722,7 +7062,7 @@ with st.container(key=f"page_{option.replace(' ', '_')}"):
         /* Save Settings: solid blue, on the right */
         .st-key-settings_save { display: flex; justify-content: flex-end; }
         .st-key-settings_save button[data-testid] {
-            background: #5aa2ff !important; border: 1px solid #5aa2ff !important; color: #ffffff !important; font-weight: 700 !important;
+            background: #5aa2ff !important; border: 1px solid #5aa2ff !important; color: #ffffff !important; font-weight: 500 !important;
             min-height: 52px !important; border-radius: 14px !important; gap: 10px; justify-content: center !important;
         }
         .st-key-settings_save button > div { flex: none !important; width: auto !important; }

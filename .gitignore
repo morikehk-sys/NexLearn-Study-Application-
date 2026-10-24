@@ -1,23 +1,18 @@
 # Python
 venv/
-.venv/
 __pycache__/
 *.pyc
 
-# Secrets and credentials (never commit these)
+# Secrets - never commit
 .streamlit/secrets.toml
-.env
-*.pem
-*.key
 
-# Personal study data kept on this device (notes, settings, uploaded PDFs, streaks)
+# Local user data (saved notes, uploaded files, progress)
 data/
 
-# Front-end tooling and build output
+# Node
+node_modules/
 frontend/node_modules/
 frontend/.tools/
-frontend/dist/
 
-# Local tooling and exported chat sessions
-.claude/
-20??-??-??-*.txt
+# Session transcripts
+2026-*-this-session-is-being-continued-*.txt
