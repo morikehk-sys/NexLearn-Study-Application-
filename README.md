@@ -1,2 +1,2 @@
 # NexLearn
-AI-powered study platform that converts uploaded notes into quizzes, flashcards, and summaries using Python and Streamlit.
+A study platform allowing students to convert uploaded notes into quizzes, flashcards, and summaries
